@@ -1,460 +1,396 @@
 #!/usr/bin/env python3
 
-"""
-A parser for arithmetic expressions with SI units, producing an AST
-where each node stores:
-  (a) a floating-point value
-  (b) a 7-element dimension vector for the SI base units:
-       (time, length, mass, current, temperature, amount, luminous intensity)
+##############################################
+# 1. DIMENSION CONSTANTS & HELPERS
+##############################################
 
-Example inputs:
-  1 [m/s]
-  (1+1) [m/s^2]
-  1 [kg] * 9.8 [m/s^2]
-  2 [m] + 3 [m]   # valid
-  2 [m] + 3 [s]   # dimension mismatch -> error
-  5 [kg] / 2 [s^2]
-  -3 [mol] / (2 [cd])
-"""
-
-# ----------------------------------------------
-# 1. Dimension Vector Utilities
-# ----------------------------------------------
-
-# We'll store dimension vectors as tuples/lists of length 7:
-#    [ time, length, mass, current, temperature, amount, luminosity ]
-#
-# Example base units:
-#   s   -> [ 1, 0, 0, 0, 0, 0, 0 ]
-#   m   -> [ 0, 1, 0, 0, 0, 0, 0 ]
-#   kg  -> [ 0, 0, 1, 0, 0, 0, 0 ]
-#   A   -> [ 0, 0, 0, 1, 0, 0, 0 ]
-#   K   -> [ 0, 0, 0, 0, 1, 0, 0 ]
-#   mol -> [ 0, 0, 0, 0, 0, 1, 0 ]
-#   cd  -> [ 0, 0, 0, 0, 0, 0, 1 ]
+# We store dimension vectors in the order [L, M, T, I, Θ, N, J].
+#   L = length        (m)
+#   M = mass          (kg)
+#   T = time          (s)
+#   I = current       (A)
+#   Θ = temperature   (K)
+#   N = amount        (mol)
+#   J = luminous int. (cd)
 
 BASE_DIMENSIONS = {
-    "s":   [1, 0, 0, 0, 0, 0, 0],
-    "m":   [0, 1, 0, 0, 0, 0, 0],
-    "kg":  [0, 0, 1, 0, 0, 0, 0],
+    "m":   [1, 0, 0, 0, 0, 0, 0],
+    "kg":  [0, 1, 0, 0, 0, 0, 0],
+    "s":   [0, 0, 1, 0, 0, 0, 0],
     "A":   [0, 0, 0, 1, 0, 0, 0],
     "K":   [0, 0, 0, 0, 1, 0, 0],
     "mol": [0, 0, 0, 0, 0, 1, 0],
     "cd":  [0, 0, 0, 0, 0, 0, 1],
 }
 
+def zero_dim():
+    return [0, 0, 0, 0, 0, 0, 0]
 
 def dim_add(d1, d2):
-    """Add two dimension vectors (for multiplication)."""
     return [a + b for (a, b) in zip(d1, d2)]
 
 def dim_sub(d1, d2):
-    """Subtract two dimension vectors (for division)."""
     return [a - b for (a, b) in zip(d1, d2)]
 
-def dim_mul(d, factor):
-    """Multiply all elements of a dimension vector by an integer exponent."""
-    return [x * factor for x in d]
+def dim_mul(d, n):
+    return [x * n for x in d]
 
 def dim_eq(d1, d2):
-    """Check if two dimension vectors are equal."""
-    return all(a == b for (a, b) in zip(d1, d2))
+    return all(a == b for a, b in zip(d1, d2))
 
-def zero_dim():
-    """Return a zero dimension vector (dimensionless)."""
-    return [0, 0, 0, 0, 0, 0, 0]
+##############################################
+# 2. AST NODES
+##############################################
 
-
-# ----------------------------------------------
-# 2. AST Node Definition
-# ----------------------------------------------
-
-class ASTNode:
+class NumberNode:
     """
-    Represents a node in the final abstract syntax tree, storing:
-      - numeric_value: float
-      - dimension: a 7-element list of exponents
-      - node_type: "number", "binop", etc.
-      - operator: for binop nodes, the operator symbol
-      - left, right: children (for binop)
+    Numeric literal (string) + optional raw unit string from brackets.
+    E.g. value_str="1.5", unit_str="kg" or "m/s^2" or None if dimensionless.
     """
-
-    def __init__(self, node_type, numeric_value, dimension, operator=None, left=None, right=None):
-        self.node_type = node_type  # "number" or "binop"
-        self.numeric_value = numeric_value  # float
-        self.dimension = dimension         # 7-element list
-        self.operator = operator           # e.g. "+", "-", "*", "/"
-        self.left = left                   # ASTNode
-        self.right = right                 # ASTNode
+    def __init__(self, value_str, unit_str=None):
+        self.value_str = value_str
+        self.unit_str = unit_str
 
     def __repr__(self):
-        if self.node_type == "number":
-            return f"<AST number={self.numeric_value}, dim={self.dimension}>"
-        elif self.node_type == "binop":
-            return (f"<AST binop='{self.operator}' dim={self.dimension}>\n"
-                    f"  left={self.left}\n"
-                    f"  right={self.right}>\n")
-        else:
-            return f"<AST unknown type={self.node_type}>"
+        if self.unit_str:
+            return f"NumberNode(value={self.value_str}, unit=[{self.unit_str}])"
+        return f"NumberNode(value={self.value_str})"
 
 
-# ----------------------------------------------
+class BinOpNode:
+    """
+    Operator node with left, op, right.
+    op in {+ - * / ^}
+    """
+    def __init__(self, left, op, right):
+        self.left = left
+        self.op = op
+        self.right = right
+
+    def __repr__(self):
+        return f"BinOpNode({self.left} {self.op} {self.right})"
+
+##############################################
 # 3. LEXER
-# ----------------------------------------------
+##############################################
 
 def tokenize(text):
     """
-    Convert the input string into a list of tokens.
-    Recognized tokens:
-      - Parentheses: '(' or ')'
-      - Brackets for units: '[' or ']'
-      - Arithmetic operators: '+', '-', '*', '/'
-      - Caret: '^'
-      - SI base units: s, m, kg, A, K, mol, cd
-      - Numbers: integers or floats, optionally signed (e.g. -3.14, +2, 1.0, 42)
-    Whitespace is ignored.
+    Splits the input into tokens:
+      - numeric tokens (possibly signed)
+      - parentheses: ( )
+      - operators: + - * / ^
+      - bracketed unit chunk: anything from '[' to ']' is one token, e.g. [m/s^2]
+      - whitespace ignored
     """
     tokens = []
     i = 0
-    length = len(text)
+    n = len(text)
 
-    while i < length:
+    while i < n:
         c = text[i]
 
-        # Skip whitespace
         if c.isspace():
             i += 1
             continue
 
-        # Single-char tokens (or easily recognized)
-        if c in ('(', ')', '[', ']', '+', '*', '/', '^'):
+        # Parentheses or operators
+        if c in ('(', ')', '+', '*', '/', '^'):
             tokens.append(c)
             i += 1
             continue
 
-        # Distinguish minus as operator vs. minus as part of a number
-        # Strategy: If '-' is followed by a digit or a dot, treat it as signed number
+        # Distinguish minus as unary sign vs. operator
         if c == '-':
-            if i + 1 < length and (text[i+1].isdigit() or text[i+1] == '.'):
-                # It's a negative number
+            # If next char is digit or '.', treat as part of a number
+            if (i + 1 < n) and (text[i+1].isdigit() or text[i+1] == '.'):
                 start = i
                 i += 1
-                # consume digits or decimal
-                has_dot = False
-                while i < length and (text[i].isdigit() or (text[i] == '.' and not has_dot)):
-                    if text[i] == '.':
-                        has_dot = True
+                while i < n and (text[i].isdigit() or text[i] == '.'):
                     i += 1
-                tokens.append(text[start:i])
+                tokens.append(text[start:i])  # e.g. "-3.14"
             else:
-                # It's just the minus operator
                 tokens.append('-')
                 i += 1
             continue
 
-        # Letters -> Could be base unit, e.g. 'kg', 'mol'
-        if c.isalpha():
+        # Bracketed unit: read everything up to matching ']'
+        if c == '[':
             start = i
-            while i < length and text[i].isalpha():
-                i += 1
-            tokens.append(text[start:i])  # e.g. "kg", "mol"
+            i += 1
+            # find the matching ']'
+            bracket_depth = 1
+            while i < n and bracket_depth > 0:
+                if text[i] == ']':
+                    bracket_depth -= 1
+                else:
+                    i += 1
+            if bracket_depth != 0:
+                raise ValueError("Mismatched '[' ']' in unit specification.")
+            # i now points to the ']' => i += 1 to include it
+            i += 1
+            # The entire bracketed substring
+            tokens.append(text[start:i])  # e.g. "[m/s^2]"
             continue
 
-        # Digits or decimal -> parse as (possibly) a float
+        # Numbers (unsigned, if minus was handled above)
         if c.isdigit() or c == '.':
             start = i
-            has_dot = (c == '.')
             i += 1
-            while i < length and (text[i].isdigit() or (text[i] == '.' and not has_dot)):
-                if text[i] == '.':
-                    has_dot = True
+            while i < n and (text[i].isdigit() or text[i] == '.'):
                 i += 1
             tokens.append(text[start:i])
             continue
 
-        raise ValueError(f"Unrecognized character '{c}' at index {i}")
+        raise ValueError(f"Unexpected character '{c}' at index {i}")
 
     return tokens
 
-
-# ----------------------------------------------
+##############################################
 # 4. PARSER
-# ----------------------------------------------
+##############################################
 
 class Parser:
     """
-    A recursive-descent parser that constructs an AST where each node
-    includes a numeric value and a 7-element dimension vector.
+    Grammar:
+      Expr   -> Term (('+'|'-') Term)*
+      Term   -> Factor (('*'|'/') Factor)*
+      Factor -> Power ('^' Factor)?   // exponent
+      Power  -> NumberWithOptionalUnit | '(' Expr ')'
     """
-
     def __init__(self, tokens):
         self.tokens = tokens
         self.pos = 0
 
     def current_token(self):
-        if self.pos < len(self.tokens):
-            return self.tokens[self.pos]
-        return None  # End of stream
+        return self.tokens[self.pos] if self.pos < len(self.tokens) else None
 
-    def advance(self):
-        self.pos += 1
-
-    def match(self, *expected_values):
-        """
-        If the current token is in expected_values, consume and return it.
-        Otherwise return None.
-        """
+    def match(self, *expected):
         tok = self.current_token()
-        if tok in expected_values:
-            self.advance()
+        if tok in expected:
+            self.pos += 1
             return tok
         return None
 
-    def expect(self, *expected_values):
+    def expect(self, *expected):
         tok = self.current_token()
-        if tok in expected_values:
-            self.advance()
-            return tok
-        raise ValueError(f"Parse error: expected one of {expected_values}, got '{tok}'")
+        if tok not in expected:
+            raise ValueError(f"Expected one of {expected}, got {tok}")
+        self.pos += 1
+        return tok
 
     def parse(self):
-        """
-        Parse the entire input as an arithmetic expression.
-        Return the root ASTNode.
-        """
-        node = self.parse_arithmetic_expr()
+        node = self.parse_expr()
         if self.current_token() is not None:
-            raise ValueError(f"Extra tokens after a valid expression: {self.current_token()}")
+            raise ValueError(f"Extra tokens after valid expression: {self.current_token()}")
         return node
 
-    # --------------------------------------
-    # 4.1 Arithmetic Grammar
-    # --------------------------------------
-
-    def parse_arithmetic_expr(self):
-        """
-        ArithmeticExpr -> Term (("+" | "-") Term)*
-        """
+    def parse_expr(self):
+        """Expr -> Term (('+'|'-') Term)*"""
         node = self.parse_term()
-
         while True:
-            op = self.match("+", "-")
+            op = self.match('+', '-')
             if not op:
                 break
             right = self.parse_term()
-            node = self.make_binop_node(op, node, right)
+            node = BinOpNode(node, op, right)
         return node
 
     def parse_term(self):
-        """
-        Term -> Factor (("*" | "/") Factor)*
-        """
+        """Term -> Factor (('*'|'/') Factor)*"""
         node = self.parse_factor()
-
         while True:
-            op = self.match("*", "/")
+            op = self.match('*', '/')
             if not op:
                 break
             right = self.parse_factor()
-            node = self.make_binop_node(op, node, right)
+            node = BinOpNode(node, op, right)
         return node
 
     def parse_factor(self):
-        """
-        Factor -> NumberWithOptionalUnit | "(" ArithmeticExpr ")"
-        """
-        if self.match("("):
-            expr_node = self.parse_arithmetic_expr()
-            self.expect(")")
-            return expr_node
+        """Factor -> Power ('^' Factor)?"""
+        base = self.parse_power()
+        if self.match('^'):
+            exponent = self.parse_factor()
+            return BinOpNode(base, '^', exponent)
+        return base
+
+    def parse_power(self):
+        """Power -> NumberWithOptionalUnit | '(' Expr ')'"""
+        if self.match('('):
+            node = self.parse_expr()
+            self.expect(')')
+            return node
         else:
-            return self.parse_number_with_optional_unit()
+            return self.parse_number_with_unit()
 
-    # --------------------------------------
-    # 4.2 Number + Optional Unit
-    # --------------------------------------
-
-    def parse_number_with_optional_unit(self):
+    def parse_number_with_unit(self):
         """
-        Parse a numeric token (integer or float, possibly negative)
-        followed by an optional unit specification in brackets:
-          e.g. 3.14 [m/s]
+        A numeric token plus optional bracket token.
+        e.g.  "3.14" or "3.14 [m/s^2]"
         """
         tok = self.current_token()
         if tok is None:
-            raise ValueError("Expected number, found end of input.")
-
-        # Parse the numeric portion
-        num_value = self.parse_float(tok)
-        self.advance()
-
-        dim = zero_dim()  # dimensionless by default
-
-        # Check if next token is '[' -> unit specification
-        if self.match("["):
-            # parse unit expression, then expect ']'
-            dim = self.parse_unit_expr()
-            self.expect("]")
-
-        # Return an AST node with the numeric value + dimension
-        return ASTNode(
-            node_type="number",
-            numeric_value=num_value,
-            dimension=dim
-        )
-
-    @staticmethod
-    def parse_float(token):
-        """Try converting token to float."""
+            raise ValueError("Expected number, got end of input.")
+        # Validate numeric
+        # If this fails, it's not a number
         try:
-            return float(token)
+            float(tok)
         except ValueError:
-            raise ValueError(f"Expected a numeric token, got '{token}'")
+            raise ValueError(f"Expected numeric token, got {tok}")
+        self.pos += 1  # consume the numeric
 
-    # --------------------------------------
-    # 4.3 Unit Grammar
-    # --------------------------------------
+        # Check if next token is a bracketed unit
+        unit_tok = None
+        if self.current_token() and self.current_token().startswith('['):
+            unit_tok = self.current_token()
+            self.pos += 1  # consume it
 
-    def parse_unit_expr(self):
-        """
-        UnitExpr -> UnitTerm (("*" | "/") UnitTerm)*
-        Returns a dimension vector.
-        """
-        dim = self.parse_unit_term()
-        while True:
-            op = self.match("*", "/")
-            if not op:
-                break
-            right_dim = self.parse_unit_term()
-            if op == "*":
-                dim = dim_add(dim, right_dim)
-            else:  # op == "/"
-                dim = dim_sub(dim, right_dim)
-        return dim
+        return NumberNode(value_str=tok, unit_str=unit_tok)
 
-    def parse_unit_term(self):
-        """
-        UnitTerm -> UnitFactor ["^" Exponent]
-        Returns a dimension vector.
-        """
-        dim = self.parse_unit_factor()
-        if self.match("^"):
-            exponent_token = self.current_token()
-            if exponent_token is None:
-                raise ValueError("Expected exponent after '^'")
-            # Check exponent is integer
-            if exponent_token.lstrip('+-').isdigit():
-                exponent_val = int(exponent_token)
-                self.advance()
-                dim = dim_mul(dim, exponent_val)
-            else:
-                raise ValueError(f"Invalid exponent '{exponent_token}'")
-        return dim
+##############################################
+# 5. INTERPRETER (WITH DIMENSIONAL ANALYSIS)
+##############################################
 
-    def parse_unit_factor(self):
-        """
-        UnitFactor -> "(" UnitExpr ")" | Base
-        Returns a dimension vector.
-        """
-        if self.match("("):
-            dim = self.parse_unit_expr()
-            self.expect(")")
-            return dim
+def evaluate(node):
+    """Recursively evaluate the AST node, returning (value: float, dim: list[7])."""
+    if isinstance(node, NumberNode):
+        val = float(node.value_str)
+        # Parse unit string (if any) into a dimension vector
+        if not node.unit_str:
+            dim = zero_dim()  # dimensionless
         else:
-            return self.parse_base()
+            dim = parse_unit_string(node.unit_str)
+        return (val, dim)
 
-    def parse_base(self):
-        """
-        Base -> s | m | kg | A | K | mol | cd
-        Returns a dimension vector for that base.
-        """
-        tok = self.current_token()
-        if tok in BASE_DIMENSIONS:
-            self.advance()
-            return BASE_DIMENSIONS[tok][:]
-        else:
-            raise ValueError(f"Expected base unit, got '{tok}'")
+    elif isinstance(node, BinOpNode):
+        left_val, left_dim = evaluate(node.left)
+        right_val, right_dim = evaluate(node.right)
+        op = node.op
 
-    # --------------------------------------
-    # 4.4 Building BinOp Nodes
-    # --------------------------------------
-
-    def make_binop_node(self, op, left_node, right_node):
-        """
-        Build a binop ASTNode given operator (op), left_node, right_node.
-        We also compute the dimension vector and numeric_value.
-        """
-        # 1) Dimension logic
-        if op in ("+", "-"):
-            # dimension vectors must match
-            if not dim_eq(left_node.dimension, right_node.dimension):
+        if op == '+':
+            if not dim_eq(left_dim, right_dim):
                 raise ValueError(
-                    f"Dimension mismatch in '{op}' operation: "
-                    f"{left_node.dimension} vs {right_node.dimension}"
+                    f"Dimension mismatch in addition: {left_dim} vs {right_dim}"
                 )
-            dim_result = left_node.dimension[:]  # same dimension
-            # 2) Numeric result
-            if op == "+":
-                val_result = left_node.numeric_value + right_node.numeric_value
-            else:  # "-"
-                val_result = left_node.numeric_value - right_node.numeric_value
+            return (left_val + right_val, left_dim)
 
-        elif op == "*":
-            # dimension = sum
-            dim_result = dim_add(left_node.dimension, right_node.dimension)
-            # numeric = multiply
-            val_result = left_node.numeric_value * right_node.numeric_value
+        elif op == '-':
+            if not dim_eq(left_dim, right_dim):
+                raise ValueError(
+                    f"Dimension mismatch in subtraction: {left_dim} vs {right_dim}"
+                )
+            return (left_val - right_val, left_dim)
 
-        elif op == "/":
-            # dimension = difference
-            dim_result = dim_sub(left_node.dimension, right_node.dimension)
-            # numeric = divide
-            if right_node.numeric_value == 0:
+        elif op == '*':
+            return (left_val * right_val, dim_add(left_dim, right_dim))
+
+        elif op == '/':
+            if right_val == 0:
                 raise ValueError("Division by zero in numeric part.")
-            val_result = left_node.numeric_value / right_node.numeric_value
+            return (left_val / right_val, dim_sub(left_dim, right_dim))
+
+        elif op == '^':
+            # exponent must be dimensionless & typically an integer
+            if not dim_eq(right_dim, zero_dim()):
+                raise ValueError("Exponent must be dimensionless.")
+            exponent_int = int(right_val)  # allow float->int
+            return (left_val ** exponent_int, dim_mul(left_dim, exponent_int))
 
         else:
-            raise ValueError(f"Unknown operator '{op}'")
+            raise ValueError(f"Unknown operator: {op}")
 
-        return ASTNode(
-            node_type="binop",
-            numeric_value=val_result,
-            dimension=dim_result,
-            operator=op,
-            left=left_node,
-            right=right_node
-        )
+    else:
+        raise TypeError("Invalid AST node type.")
 
+def parse_unit_string(unit_tok):
+    """
+    Convert a bracketed unit token (e.g. "[m/s^2]" or "[-]") into a dimension vector.
+    We strip off the brackets first, then parse what's inside.
+    """
+    # e.g. if unit_tok="[m/s^2]", inside="m/s^2"
+    inside = unit_tok.strip()
+    if not inside.startswith('[') or not inside.endswith(']'):
+        raise ValueError(f"Bad bracket token: {unit_tok}")
 
-# ----------------------------------------------
-# 5. DEMO / MAIN
-# ----------------------------------------------
+    inside = inside[1:-1].strip()  # remove '[' and ']'
+
+    # Special case: "[-]" means dimensionless
+    if inside == '-' or inside == '':
+        return zero_dim()
+
+    # We'll do a very simple parse: split on '*' and '/' in order.
+    # e.g. "m/s^2" => "m", "/", "s^2"
+    import re
+    parts = re.split(r'([\*/])', inside)
+    parts = [p.strip() for p in parts if p.strip()]
+
+    dim = zero_dim()
+    current_op = '*'
+
+    for part in parts:
+        if part in ('*', '/'):
+            current_op = part
+        else:
+            # part might be "m", "s^2", "kg^3"
+            base, exponent = parse_base_exponent(part)
+            if base not in BASE_DIMENSIONS:
+                raise ValueError(
+                    f"Unknown base unit '{base}'. Must be one of {list(BASE_DIMENSIONS.keys())}, or '[-]' for dimensionless."
+                )
+            factor_dim = dim_mul(BASE_DIMENSIONS[base], exponent)
+
+            if current_op == '*':
+                dim = dim_add(dim, factor_dim)
+            else:  # '/'
+                dim = dim_sub(dim, factor_dim)
+
+    return dim
+
+def parse_base_exponent(token):
+    """
+    For something like "m^2" => (base="m", exponent=2).
+    If there's no '^', exponent=1.
+    """
+    if '^' in token:
+        base, exp_str = token.split('^', 1)
+        e = int(exp_str.strip())
+    else:
+        base = token
+        e = 1
+    return base.strip(), e
+
+##############################################
+# 6. DEMO
+##############################################
 
 def main():
-    TEST_INPUTS = [
-        "1 [m/s]",
-        "(1+1) [m/s^2]",
-        "1 [kg] * 9.8 [m/s^2]",
+    examples = [
         "2 [m] + 3 [m]",
-        "2 [m] + 3 [s]",    # dimension mismatch
-        "5 [kg] / 2 [s^2]",
-        "-3 [mol] / (2 [cd])",
-        "2 [m^1] + 5 [m]"   # same dimension
+        "2 [m] + 3 [s]",         # dimension mismatch
+        "1.5 [kg] * 2 [m/s^2]",
+        "10 [m] / 5 [s]",
+        "(2 [m/s])^2",
+        "3 [m] - 1 [m]",
+        "3 [m] - 1 [s]",
+        "3.14 [-]",             # dimensionless
+        "-2 [s] * 5 [m]",
+        "2.0 [kg] / 2 [kg]"     # dimensionless result
     ]
 
-    for inp in TEST_INPUTS:
-        print(f"\nExpression: {inp}")
+    for expr in examples:
+        print(f"\nEXPRESSION: {expr}")
         try:
-            tokens = tokenize(inp)
+            tokens = tokenize(expr)
             parser = Parser(tokens)
-            ast_root = parser.parse()
+            ast = parser.parse()
+            (value, dim) = evaluate(ast)
             print("  => Tokens:", tokens)
-            print("  => AST:", ast_root)
-            print(f"     numeric_value = {ast_root.numeric_value}")
-            print(f"     dimension_vector = {ast_root.dimension}")
-        except ValueError as e:
+            print("  => AST:", ast)
+            print(f"  => Value: {value}")
+            print(f"  => Dimension [L,M,T,I,Θ,N,J]: {dim}")
+        except Exception as e:
             print("  ERROR:", e)
-
 
 if __name__ == "__main__":
     main()
