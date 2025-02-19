@@ -12,7 +12,7 @@ from rich.table import Table
 # 1. DIMENSION CONSTANTS & HELPERS
 ##############################################
 
-# Dimension vector order: [L, M, T, I, Θ, N, J].
+# We use the dimension vector order: [L, M, T, I, Θ, N, J].
 #   L = length        (m)
 #   M = mass          (kg)
 #   T = time          (s)
@@ -31,7 +31,9 @@ BASE_DIMENSIONS = {
     "cd":  [0, 0, 0, 0, 0, 0, 1],  # luminous intensity
 }
 
+# A lookup for base-unit index -> symbol, for leftover exponents
 INDEX_TO_BASE = ["m", "kg", "s", "A", "K", "mol", "cd"]
+
 
 def zero_dim():
     return [0, 0, 0, 0, 0, 0, 0]
@@ -52,58 +54,34 @@ def is_dimless(d):
     return all(x == 0 for x in d)
 
 
-def dim_to_si_string(dim):
-    """
-    Convert a 7D exponent vector into a human-readable SI expression.
-    Example:
-      [1,0,-2,0,0,0,0] => "m / s^2"
-      [0,0,0,0,0,0,0] => "-" (or return something like "")
-      [1,1,-3,0,0,0,0] => "kg*m^1 / s^3" or simply "kg*m / s^3"
-    We'll omit "^1" and show negative exponents in the denominator.
-    """
-    # If dimensionless, return a marker like "-" (or "")
-    if is_dimless(dim):
-        return "-"  # or just return "" to signify dimensionless
+##############################################
+# 2. COMMON DERIVED UNITS
+##############################################
+# We store each standard derived unit's 7D vector in the same [L, M, T, I, Θ, N, J] order.
 
-    # We'll gather numerator parts and denominator parts
-    numerator_parts = []
-    denominator_parts = []
+DERIVED_UNITS = {
+    (0, 0, -1, 0, 0, 0, 0): "Hz",     # 1/s
+    (1, 1, -2, 0, 0, 0, 0): "N",      # kg*m/s^2
+    (-1, 1, -2, 0, 0, 0, 0): "Pa",    # N/m^2
+    (2, 1, -2, 0, 0, 0, 0): "J",      # N*m
+    (2, 1, -3, 0, 0, 0, 0): "W",      # J/s
+    (0, 0, 1, 1, 0, 0, 0): "C",       # A*s
+    (2, 1, -3, -1, 0, 0, 0): "V",     # W/A = J/(C)
+    (-2, -1, 4, 2, 0, 0, 0): "F",     # C/V
+    (2, 1, -3, -2, 0, 0, 0): "Ω",     # V/A
+    (-2, -1, 3, 2, 0, 0, 0): "S",     # 1/Ω
+    (2, 1, -2, -1, 0, 0, 0): "Wb",    # V*s
+    (0, 1, -2, -1, 0, 0, 0): "T",     # Wb/m^2
+    (2, 1, -2, -2, 0, 0, 0): "H",     # Wb/A
+    (0, 0, -1, 0, 0, 0, 0): "Bq",     # 1/s (same as Hz, but used for radioactivity)
+    (2, 0, -2, 0, 0, 0, 0): "Gy",     # J/kg (also "Sv")
+    (0, 0, -1, 0, 0, 1, 0): "kat",    # mol/s
+    # ... add more if desired ...
+}
 
-    for i, exponent in enumerate(dim):
-        if exponent == 0:
-            continue
-
-        base_symbol = INDEX_TO_BASE[i]
-        exp_abs = abs(exponent)
-
-        # Omit "^1"
-        if exp_abs == 1:
-            exp_str = base_symbol
-        else:
-            exp_str = f"{base_symbol}^{exp_abs}"
-
-        if exponent > 0:
-            numerator_parts.append(exp_str)
-        else:
-            # exponent < 0
-            denominator_parts.append(exp_str)
-
-    # Build the final string
-    # (We separate numerator pieces with '*', likewise denominator pieces)
-    numerator = "*".join(numerator_parts)
-    denominator = "*".join(denominator_parts)
-
-    if numerator and not denominator:
-        return numerator
-    elif denominator and not numerator:
-        # e.g. if it's purely s^-2, that means 1 / s^2
-        return f"1/{denominator}"
-    else:
-        # both are non-empty
-        return f"{numerator} / {denominator}"
 
 ##############################################
-# 2. AST NODES
+# 3. AST NODE DEFINITIONS
 ##############################################
 
 class NumberNode:
@@ -134,8 +112,9 @@ class BinOpNode:
     def __repr__(self):
         return f"BinOpNode({self.left} {self.op} {self.right})"
 
+
 ##############################################
-# 3. LEXER
+# 4. LEXER
 ##############################################
 
 def tokenize(text):
@@ -208,8 +187,9 @@ def tokenize(text):
 
     return tokens
 
+
 ##############################################
-# 4. PARSER
+# 5. PARSER
 ##############################################
 
 class Parser:
@@ -308,8 +288,9 @@ class Parser:
 
         return NumberNode(tok, unit_tok)
 
+
 ##############################################
-# 5. INTERPRETER (DIMENSIONAL ANALYSIS)
+# 6. INTERPRETER (DIMENSIONAL ANALYSIS)
 ##############################################
 
 def evaluate(node):
@@ -330,6 +311,7 @@ def evaluate(node):
         op = node.op
 
         if op == '+':
+            # dimension must match
             if not dim_eq(left_dim, right_dim):
                 raise ValueError(
                     f"Dimension mismatch in addition: {left_dim} vs {right_dim}"
@@ -337,6 +319,7 @@ def evaluate(node):
             return (left_val + right_val, left_dim)
 
         elif op == '-':
+            # dimension must match
             if not dim_eq(left_dim, right_dim):
                 raise ValueError(
                     f"Dimension mismatch in subtraction: {left_dim} vs {right_dim}"
@@ -363,6 +346,7 @@ def evaluate(node):
 
     else:
         raise TypeError("Invalid AST node type.")
+
 
 def parse_unit_string(unit_tok):
     """
@@ -417,8 +401,142 @@ def parse_base_exponent(token):
         base, e = token, 1
     return base.strip(), e
 
+
 ##############################################
-# 6. REPL & CLI
+# 7. UNIT SIMPLIFICATION LOGIC
+##############################################
+
+def can_factor_out(dim, derived):
+    """
+    Returns True if `dim - derived` does not cause any exponent to go below that in `dim`
+    in a "bad" way. In other words, for each i, dim[i] >= derived[i].
+    This naive approach only checks if all subtractions remain >= 0, 
+    which is appropriate if we see each derived unit as an 'add' to exponents
+    from zero. For negative exponents or more complex combos, one might generalize further.
+    
+    We'll do a simpler check: For us to "factor out" the derived vector dV from dim,
+    we need: dim[i] - dV[i] >= 0 if dV[i] >= 0, 
+    or dim[i] - dV[i] <= 0 if dV[i] < 0, etc.
+    
+    Actually it's easier: we want to see if we can subtract the derived vector 
+    in full. That means dim[i] >= derived[i] for every i. (Because the exponents
+    are added for multiplication. So to factor out, we subtract.)
+    """
+    for i in range(7):
+        if dim[i] < derived[i]:
+            return False
+    return True
+
+
+def factor_out_known_units(dim):
+    """
+    Tries to factor out known derived units (like N, J, Pa, etc.) from the dimension vector.
+    Returns a list of (unit_name, count) plus the leftover dimension.
+
+    Example:
+      If dim == (1,1,-2,0,0,0,0), that matches "N" exactly => [("N",1)] leftover (0,0,0,0,0,0,0).
+      If dim == (2,1,-3,0,0,0,0),
+         we might factor out "N" once => leftover (1,0,-1,0,0,0,0) => "m/s", etc.
+         We'll do a naive approach in a fixed order.
+
+    This function does a "greedy" approach in the order we define below.
+    """
+    # We'll define a stable order to try factoring out.
+    # Typically you might want to put bigger/ more "common" units first,
+    # or you can do alphabetical. We'll just define an array from the dictionary.
+    derived_list = list(DERIVED_UNITS.items())
+    # E.g. [((0,0,-1,0,0,0,0),"Hz"), ((1,1,-2,0,0,0,0),"N"), ...]
+    # Sort them in some consistent manner (not strictly necessary):
+    derived_list.sort(key=lambda x: x[1])  # sort by name
+
+    factors = []
+    dim_left = dim[:]
+
+    for vec, name in derived_list:
+        count = 0
+        # While we can factor out this derived unit, do so
+        while can_factor_out(dim_left, vec):
+            # subtract
+            dim_left = dim_sub(dim_left, vec)
+            count += 1
+        if count > 0:
+            factors.append((name, count))
+
+    return factors, dim_left
+
+
+def leftover_dim_to_string(dim):
+    """
+    Convert any leftover dimension exponents to a base-unit expression (m^x * kg^y / s^z, etc.).
+    We'll do a standard numerator/denominator approach, ignoring standard derived unit names here.
+    If dimensionless, return "" or "-".
+    """
+    if is_dimless(dim):
+        return ""
+
+    numerator_parts = []
+    denominator_parts = []
+    for i, exponent in enumerate(dim):
+        if exponent == 0:
+            continue
+        base_symbol = INDEX_TO_BASE[i]
+        e_abs = abs(exponent)
+        if e_abs == 1:
+            exp_str = base_symbol
+        else:
+            exp_str = f"{base_symbol}^{e_abs}"
+        if exponent > 0:
+            numerator_parts.append(exp_str)
+        else:
+            denominator_parts.append(exp_str)
+
+    if not numerator_parts and not denominator_parts:
+        return ""
+
+    if not numerator_parts:
+        # purely denominator
+        return "1/" + "*".join(denominator_parts)
+    elif not denominator_parts:
+        return "*".join(numerator_parts)
+    else:
+        return "*".join(numerator_parts) + " / " + "*".join(denominator_parts)
+
+
+def simplify_dimension(dim):
+    """
+    Attempt to factor out known derived units repeatedly, then represent leftover in base units.
+    Produce a string like "N*m/s^2" or "Pa" or "Hz", etc.
+    """
+    if is_dimless(dim):
+        return "-"  # or just ""
+
+    # 1) Factor out known derived units
+    factors, leftover = factor_out_known_units(dim)
+
+    # 2) Build a string from those factors
+    factor_strs = []
+    for (unit_name, cnt) in factors:
+        if cnt == 1:
+            factor_strs.append(unit_name)
+        else:
+            # e.g. "N^2"
+            factor_strs.append(f"{unit_name}^{cnt}")
+
+    # 3) Convert leftover base exponents to a string
+    left_str = leftover_dim_to_string(leftover)
+    if left_str:
+        factor_strs.append(left_str)
+
+    # Combine them with '*' in between
+    if not factor_strs:
+        return "-"  # dimensionless after factoring
+    else:
+        # e.g. "N*m/s^2", "Wb/(mol*K^2)", etc.
+        return "*".join(factor_strs)
+
+
+##############################################
+# 8. REPL & CLI
 ##############################################
 
 console = Console()
@@ -450,8 +568,8 @@ def repl():
 
         try:
             val, dim = evaluate_expression(expr)
-            # Convert dimension to human-readable SI
-            dim_str = dim_to_si_string(dim)
+            # Convert dimension to a simplified derived-unit string
+            dim_str = simplify_dimension(dim)
             console.print(f"[yellow]Result:[/] {val} [magenta]{dim_str}[/]")
         except Exception as e:
             console.print(f"[red]ERROR:[/] {e}")
@@ -474,7 +592,7 @@ def main():
         for expr in args.expressions:
             try:
                 val, dim = evaluate_expression(expr)
-                dim_str = dim_to_si_string(dim)
+                dim_str = simplify_dimension(dim)
                 console.print(f"[bold]{expr}[/] => [yellow]{val}[/] [magenta]{dim_str}[/]")
             except Exception as e:
                 console.print(f"[red]ERROR in '{expr}':[/] {e}")
