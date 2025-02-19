@@ -12,27 +12,62 @@ from rich.table import Table
 # 1. DIMENSION CONSTANTS & HELPERS
 ##############################################
 
-# We use dimension vector order: [L, M, T, I, Θ, N, J].
+# Order: [L, M, T, I, Θ, N, J]
+# L = length (m), M = mass (kg), T = time (s),
+# I = current (A), Θ = temperature (K), N = amount (mol), J = luminous (cd)
+
+# --------------------------
+# Base units as dimension vectors:
 BASE_DIMENSIONS = {
-    "m":   [1, 0, 0, 0, 0, 0, 0],
-    "kg":  [0, 1, 0, 0, 0, 0, 0],
-    "s":   [0, 0, 1, 0, 0, 0, 0],
-    "A":   [0, 0, 0, 1, 0, 0, 0],
-    "K":   [0, 0, 0, 0, 1, 0, 0],
-    "mol": [0, 0, 0, 0, 0, 1, 0],
-    "cd":  [0, 0, 0, 0, 0, 0, 1],
+    "m":   [1, 0, 0, 0, 0, 0, 0],  # length
+    "kg":  [0, 1, 0, 0, 0, 0, 0],  # mass
+    "s":   [0, 0, 1, 0, 0, 0, 0],  # time
+    "A":   [0, 0, 0, 1, 0, 0, 0],  # electric current
+    "K":   [0, 0, 0, 0, 1, 0, 0],  # temperature
+    "mol": [0, 0, 0, 0, 0, 1, 0],  # amount
+    "cd":  [0, 0, 0, 0, 0, 0, 1],  # luminous intensity
 }
+
+# --------------------------
+# Derived units as dimension vectors (we'll parse them as well):
+DERIVED_DIMENSIONS = {
+    # Mechanics
+    "Hz":  [0, 0, -1, 0, 0, 0, 0],  # s^-1
+    "N":   [1, 1, -2, 0, 0, 0, 0],  # kg*m/s^2
+    "Pa":  [-1, 1, -2, 0, 0, 0, 0], # N/m^2
+    "J":   [2, 1, -2, 0, 0, 0, 0],  # N*m
+    "W":   [2, 1, -3, 0, 0, 0, 0],  # J/s
+    # Electricity & Magnetism
+    "C":   [0, 0, 1, 1, 0, 0, 0],   # A*s
+    "V":   [2, 1, -3, -1, 0, 0, 0], # W/A
+    "F":   [-2, -1, 4, 2, 0, 0, 0], # C/V
+    "Ω":   [2, 1, -3, -2, 0, 0, 0], # V/A
+    "S":   [-2, -1, 3, 2, 0, 0, 0], # 1/Ω
+    "Wb":  [2, 1, -2, -1, 0, 0, 0], # V*s
+    "T":   [0, 1, -2, -1, 0, 0, 0], # Wb/m^2
+    "H":   [2, 1, -2, -2, 0, 0, 0], # Wb/A
+    # Radioactivity / Other
+    "Bq":  [0, 0, -1, 0, 0, 0, 0],  # same vector as Hz, but different usage
+    "Gy":  [2, 0, -2, 0, 0, 0, 0],  # J/kg
+    "Sv":  [2, 0, -2, 0, 0, 0, 0],  # same vector as Gy
+    "kat": [0, 0, -1, 0, 0, 1, 0],  # mol/s
+}
+
+# We'll merge them so the parser can handle both base and derived units by name:
+ALL_UNIT_DIMENSIONS = {}
+ALL_UNIT_DIMENSIONS.update(BASE_DIMENSIONS)
+ALL_UNIT_DIMENSIONS.update(DERIVED_DIMENSIONS)
 
 INDEX_TO_BASE = ["m", "kg", "s", "A", "K", "mol", "cd"]
 
 def zero_dim():
-    return [0]*7
+    return [0, 0, 0, 0, 0, 0, 0]
 
 def dim_add(d1, d2):
-    return [a + b for a, b in zip(d1, d2)]
+    return [a + b for (a, b) in zip(d1, d2)]
 
 def dim_sub(d1, d2):
-    return [a - b for a, b in zip(d1, d2)]
+    return [a - b for (a, b) in zip(d1, d2)]
 
 def dim_mul(d, n):
     return [x * n for x in d]
@@ -43,35 +78,17 @@ def dim_eq(d1, d2):
 def is_dimless(d):
     return all(x == 0 for x in d)
 
-##############################################
-# 2. COMMON DERIVED UNITS
-##############################################
-
-DERIVED_UNITS = {
-    (0, 0, -1, 0, 0, 0, 0): "Hz",
-    (1, 1, -2, 0, 0, 0, 0): "N",
-    (-1, 1, -2, 0, 0, 0, 0): "Pa",
-    (2, 1, -2, 0, 0, 0, 0): "J",
-    (2, 1, -3, 0, 0, 0, 0): "W",
-    (0, 0, 1, 1, 0, 0, 0): "C",
-    (2, 1, -3, -1, 0, 0, 0): "V",
-    (-2, -1, 4, 2, 0, 0, 0): "F",
-    (2, 1, -3, -2, 0, 0, 0): "Ω",
-    (-2, -1, 3, 2, 0, 0, 0): "S",
-    (2, 1, -2, -1, 0, 0, 0): "Wb",
-    (0, 1, -2, -1, 0, 0, 0): "T",
-    (2, 1, -2, -2, 0, 0, 0): "H",
-    (0, 0, -1, 0, 0, 0, 0): "Bq",   # same as Hz dimensionally
-    (2, 0, -2, 0, 0, 0, 0): "Gy",   # same as Sv
-    (0, 0, -1, 0, 0, 1, 0): "kat",
-}
-
 
 ##############################################
-# 3. AST NODES
+# 2. AST NODES
 ##############################################
 
 class NumberNode:
+    """
+    Numeric literal (string) + optional raw unit token [ ... ].
+    Example: value_str="1.5", unit_str="[m/s^2]"
+             or value_str="2", unit_str="[J]" 
+    """
     def __init__(self, value_str, unit_str=None):
         self.value_str = value_str
         self.unit_str = unit_str
@@ -81,7 +98,12 @@ class NumberNode:
             return f"NumberNode(value={self.value_str}, unit={self.unit_str})"
         return f"NumberNode(value={self.value_str})"
 
+
 class BinOpNode:
+    """
+    Binary operation node: left op right
+    op in { '+', '-', '*', '/', '^' }
+    """
     def __init__(self, left, op, right):
         self.left = left
         self.op = op
@@ -90,11 +112,20 @@ class BinOpNode:
     def __repr__(self):
         return f"BinOpNode({self.left} {self.op} {self.right})"
 
+
 ##############################################
-# 4. LEXER
+# 3. LEXER
 ##############################################
 
 def tokenize(text):
+    """
+    Splits the input into tokens:
+      - numeric tokens (possibly signed)
+      - parentheses: ( )
+      - operators: + - * / ^
+      - bracketed unit chunk: [ ... ]
+      - ignore whitespace
+    """
     tokens = []
     i = 0
     n = len(text)
@@ -106,42 +137,44 @@ def tokenize(text):
             i += 1
             continue
 
-        # Operators or parentheses
+        # Single-char operators or parentheses
         if c in ('(', ')', '+', '*', '/', '^'):
             tokens.append(c)
             i += 1
             continue
 
-        # Distinguish minus sign
+        # Distinguish minus as unary sign vs operator
         if c == '-':
             if (i + 1 < n) and (text[i+1].isdigit() or text[i+1] == '.'):
+                # negative number
                 start = i
                 i += 1
                 while i < n and (text[i].isdigit() or text[i] == '.'):
                     i += 1
                 tokens.append(text[start:i])
             else:
+                # standalone operator
                 tokens.append('-')
                 i += 1
             continue
 
-        # Bracketed unit
+        # Bracketed unit: read until matching ']'
         if c == '[':
             start = i
-            i += 1
             bracket_depth = 1
+            i += 1
             while i < n and bracket_depth > 0:
-                if text[i] == ']':
+                if i < n and text[i] == ']':
                     bracket_depth -= 1
                 else:
                     i += 1
             if bracket_depth != 0:
-                raise ValueError("Unmatched '[' ']' in unit.")
-            i += 1
-            tokens.append(text[start:i])
+                raise ValueError("Mismatched brackets '[' ']' in unit.")
+            i += 1  # consume the ']'
+            tokens.append(text[start:i])  # entire chunk: "[ ... ]"
             continue
 
-        # Number
+        # Numbers (unsigned, if minus was handled above)
         if c.isdigit() or c == '.':
             start = i
             i += 1
@@ -154,19 +187,25 @@ def tokenize(text):
 
     return tokens
 
+
 ##############################################
-# 5. PARSER
+# 4. PARSER
 ##############################################
 
 class Parser:
+    """
+    Grammar:
+      Expr   -> Term (('+'|'-') Term)*
+      Term   -> Factor (('*'|'/') Factor)*
+      Factor -> Power ('^' Factor)?
+      Power  -> NumberWithOptionalUnit | '(' Expr ')'
+    """
     def __init__(self, tokens):
         self.tokens = tokens
         self.pos = 0
 
     def current_token(self):
-        if self.pos < len(self.tokens):
-            return self.tokens[self.pos]
-        return None
+        return self.tokens[self.pos] if self.pos < len(self.tokens) else None
 
     def match(self, *expected):
         tok = self.current_token()
@@ -209,6 +248,9 @@ class Parser:
         return node
 
     def parse_factor(self):
+        """
+        Factor -> Power ('^' Factor)?
+        """
         base = self.parse_power()
         if self.match('^'):
             exponent_node = self.parse_factor()
@@ -216,6 +258,9 @@ class Parser:
         return base
 
     def parse_power(self):
+        """
+        Power -> NumberWithOptionalUnit | '(' Expr ')'
+        """
         if self.match('('):
             node = self.parse_expr()
             self.expect(')')
@@ -228,25 +273,30 @@ class Parser:
         if tok is None:
             raise ValueError("Unexpected end of input (expected number).")
 
-        # Must parse as float
+        # Must be numeric
         try:
             float(tok)
         except ValueError:
             raise ValueError(f"Expected numeric, got {tok}")
-        self.pos += 1
 
+        self.pos += 1  # consume number
         unit_tok = None
+        # If next is bracketed unit
         if self.current_token() and self.current_token().startswith('['):
             unit_tok = self.current_token()
             self.pos += 1
 
         return NumberNode(tok, unit_tok)
 
+
 ##############################################
-# 6. INTERPRETER
+# 5. INTERPRETER (DIMENSIONAL ANALYSIS)
 ##############################################
 
 def evaluate(node):
+    """
+    Evaluate the AST node -> (value: float, dimension: [7]).
+    """
     if isinstance(node, NumberNode):
         val = float(node.value_str)
         if node.unit_str:
@@ -262,12 +312,16 @@ def evaluate(node):
 
         if op == '+':
             if not dim_eq(left_dim, right_dim):
-                raise ValueError(f"Dimension mismatch in addition: {left_dim} vs {right_dim}")
+                raise ValueError(
+                    f"Dimension mismatch in addition: {left_dim} vs {right_dim}"
+                )
             return (left_val + right_val, left_dim)
 
         elif op == '-':
             if not dim_eq(left_dim, right_dim):
-                raise ValueError(f"Dimension mismatch in subtraction: {left_dim} vs {right_dim}")
+                raise ValueError(
+                    f"Dimension mismatch in subtraction: {left_dim} vs {right_dim}"
+                )
             return (left_val - right_val, left_dim)
 
         elif op == '*':
@@ -279,49 +333,71 @@ def evaluate(node):
             return (left_val / right_val, dim_sub(left_dim, right_dim))
 
         elif op == '^':
-            if not is_dimless(right_dim):
+            # exponent must be dimensionless
+            if not dim_eq(right_dim, zero_dim()):
                 raise ValueError("Exponent must be dimensionless.")
-            exponent_int = int(right_val)
+            exponent_int = int(right_val)  # typical usage integer
             return (left_val ** exponent_int, dim_mul(left_dim, exponent_int))
 
         else:
             raise ValueError(f"Unknown operator: {op}")
 
     else:
-        raise TypeError("Invalid AST node.")
+        raise TypeError("Invalid AST node type.")
+
 
 def parse_unit_string(unit_tok):
+    """
+    e.g. "[m/s^2]", "[J/mol]", "[N*m]", "[Hz]", "[m*J/s^2]" etc.
+    We'll parse them just like base units, but allow recognized derived symbols too.
+    """
     if not (unit_tok.startswith('[') and unit_tok.endswith(']')):
         raise ValueError(f"Invalid unit token: {unit_tok}")
-    inside = unit_tok[1:-1].strip()
+
+    inside = unit_tok[1:-1].strip()  # remove brackets
+
+    # allow "[-]" or empty to mean dimensionless
     if inside == '' or inside == '-':
         return zero_dim()
 
-    import re
+    # We'll handle '*' and '/' expansions
     parts = re.split(r'([\*/])', inside)
     parts = [p.strip() for p in parts if p.strip()]
 
     dim = zero_dim()
     current_op = '*'
+
     for part in parts:
         if part in ('*', '/'):
             current_op = part
         else:
-            base, exp = parse_base_exponent(part)
-            if base not in BASE_DIMENSIONS:
+            # part might be "m", "s^2", "kg^3", "J", "Hz^2", etc.
+            base, exponent = parse_base_exponent(part)
+
+            # Check if base is in our dictionary of base or derived unit symbols
+            if base not in ALL_UNIT_DIMENSIONS:
                 raise ValueError(
-                    f"Unknown base unit '{base}' in '{unit_tok}'. "
-                    f"Allowed: {list(BASE_DIMENSIONS.keys())} or [-]."
+                    f"Unknown unit '{base}' in '{unit_tok}'.\n"
+                    f"Allowed base units: {list(BASE_DIMENSIONS.keys())}\n"
+                    f"Allowed derived units: {list(DERIVED_DIMENSIONS.keys())}"
                 )
-            factor_dim = dim_mul(BASE_DIMENSIONS[base], exp)
+
+            factor_dim = dim_mul(ALL_UNIT_DIMENSIONS[base], exponent)
+
             if current_op == '*':
                 dim = dim_add(dim, factor_dim)
-            else:
+            else:  # '/'
                 dim = dim_sub(dim, factor_dim)
 
     return dim
 
+
 def parse_base_exponent(token):
+    """
+    For something like "m^2" => base="m", exponent=2
+                  "J^3" => base="J", exponent=3
+                  "Hz"  => base="Hz", exponent=1
+    """
     if '^' in token:
         base, exp_str = token.split('^', 1)
         e = int(exp_str.strip())
@@ -329,59 +405,46 @@ def parse_base_exponent(token):
         base, e = token, 1
     return base.strip(), e
 
+
 ##############################################
-# 7. FACTORING OUT DERIVED UNITS
+# 6. UNIT SIMPLIFICATION (OPTIONAL)
 ##############################################
 
-def simplify_dimension(dim):
+# If you want to optionally do the factor-out approach (like before),
+# you can keep or remove it. For brevity, we might just do a simpler
+# "dim_to_basic_string" style. Here's a minimal example:
+
+def dim_to_basic_string(dim):
+    """
+    Show leftover exponents in base form (m^x * kg^y / s^z, etc.),
+    ignoring derived names. If dimensionless, return "-".
+    """
     if is_dimless(dim):
         return "-"
 
-    # Factor out known derived units first
-    factors, leftover = factor_out_known_units(dim)
-
-    # Build factor string
-    factor_strs = []
-    for (unit_name, cnt) in factors:
-        if cnt == 1:
-            factor_strs.append(unit_name)
-        else:
-            factor_strs.append(f"{unit_name}^{cnt}")
-
-    # Then leftover base exponents
-    left_str = leftover_dim_to_string(leftover)
-    if left_str:
-        factor_strs.append(left_str)
-
-    if not factor_strs:
-        return "-"
-    else:
-        return "*".join(factor_strs)
-
-
-def leftover_dim_to_string(dim):
-    if is_dimless(dim):
-        return ""
     numerator_parts = []
     denominator_parts = []
+
     for i, exponent in enumerate(dim):
         if exponent == 0:
             continue
         base_symbol = INDEX_TO_BASE[i]
-        e_abs = abs(exponent)
-        if e_abs == 1:
-            exp_str = base_symbol
+        exp_abs = abs(exponent)
+        if exp_abs == 1:
+            txt = base_symbol
         else:
-            exp_str = f"{base_symbol}^{e_abs}"
+            txt = f"{base_symbol}^{exp_abs}"
+
         if exponent > 0:
-            numerator_parts.append(exp_str)
+            numerator_parts.append(txt)
         else:
-            denominator_parts.append(exp_str)
+            denominator_parts.append(txt)
 
     if not numerator_parts and not denominator_parts:
-        return ""
+        return "-"
 
     if not numerator_parts:
+        # purely denominator
         return "1/" + "*".join(denominator_parts)
     elif not denominator_parts:
         return "*".join(numerator_parts)
@@ -389,60 +452,25 @@ def leftover_dim_to_string(dim):
         return "*".join(numerator_parts) + " / " + "*".join(denominator_parts)
 
 
-##
-## CRITICAL FIX: Adjust "can_factor_out" so we DON'T infinitely factor out negative exponents.
-##
-def can_factor_out(dim, derived):
-    """
-    We only factor out the 'derived' vector if leftover[i] - derived[i] doesn't push
-    any exponent in the wrong direction. The rule:
-      if derived[i] > 0 => leftover[i] >= derived[i]
-      if derived[i] < 0 => leftover[i] <= derived[i]
-    i.e. we don't want to raise leftover exponents by subtracting negative exponents.
-    """
-    for i in range(7):
-        needed = derived[i]
-        have = dim[i]
-        if needed > 0 and have < needed:
-            return False
-        if needed < 0 and have > needed:
-            return False
-    return True
-
-def factor_out_known_units(dim):
-    derived_list = list(DERIVED_UNITS.items())
-    # sort by unit name to have a stable order
-    derived_list.sort(key=lambda x: x[1])
-
-    factors = []
-    dim_left = dim[:]
-
-    for vec, name in derived_list:
-        count = 0
-        # Repeatedly factor out if possible
-        while can_factor_out(dim_left, vec):
-            # subtract
-            dim_left = dim_sub(dim_left, vec)
-            count += 1
-        if count > 0:
-            factors.append((name, count))
-
-    return factors, dim_left
-
-
 ##############################################
-# 8. REPL & CLI
+# 7. REPL & CLI
 ##############################################
 
 console = Console()
 
 def evaluate_expression(expr: str):
+    """
+    Parse & evaluate a single expression, returning (value, dimension) or raising an error.
+    """
     tokens = tokenize(expr)
     parser = Parser(tokens)
     ast = parser.parse()
     return evaluate(ast)
 
 def repl():
+    """
+    REPL using Rich. Enter expressions; 'q'/'quit'/'exit' to quit.
+    """
     console.print("[bold cyan]Welcome to the Dimensional Analysis REPL![/]")
     console.print("Enter an expression, or 'q'/'quit'/'exit' to quit.\n")
 
@@ -457,7 +485,8 @@ def repl():
 
         try:
             val, dim = evaluate_expression(expr)
-            dim_str = simplify_dimension(dim)
+            # For demonstration, let's just convert leftover exponents to base form:
+            dim_str = dim_to_basic_string(dim)
             console.print(f"[yellow]Result:[/] {val} [magenta]{dim_str}[/]")
         except Exception as e:
             console.print(f"[red]ERROR:[/] {e}")
@@ -473,15 +502,17 @@ def main():
     args = parser.parse_args()
 
     if not args.expressions:
+        # REPL mode
         repl()
     else:
+        # Evaluate each expression
         for expr in args.expressions:
             try:
                 val, dim = evaluate_expression(expr)
-                dim_str = simplify_dimension(dim)
+                dim_str = dim_to_basic_string(dim)
                 console.print(f"[bold]{expr}[/] => [yellow]{val}[/] [magenta]{dim_str}[/]")
-            except Exception as e:
-                console.print(f"[red]ERROR in '{expr}':[/] {e}")
+            except Exception as ex:
+                console.print(f"[red]ERROR in '{expr}':[/] {ex}")
 
 if __name__ == "__main__":
     main()
