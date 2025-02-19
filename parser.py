@@ -1,22 +1,30 @@
 #!/usr/bin/env python3
 
 """
-A simple lexer and parser for expressions of the form:
-  Expression -> Term { ("*" | "/") Term }
-  Term       -> Factor [ "^" Exponent ]
-  Factor     -> "(" Expression ")" | Base
-  Base       -> s | m | kg | A | K | mol | cd
-  Exponent   -> integer (optionally with + or - sign)
+A combined lexer and recursive-descent parser for arithmetic expressions
+with optional SI unit specifications.
 
-Examples of valid inputs:
-  m
-  kg * m / s^2
-  (m * kg) / (s^2 * mol)
-  A^3
+Example valid inputs:
+  1 [m/s]
+  (1+1) [m/s^2]
+  1 [kg] * 9.8 [m/s^2]
+  -3.14 [mol] / (2 [cd])
 
-Usage:
-  python si_parser.py
-  # Then type or modify the 'TEST_INPUT' string in main()
+Grammar (informal EBNF):
+
+ArithmeticExpr -> Term (("+" | "-") Term)*
+Term           -> Factor (("*" | "/") Factor)*
+Factor         -> NumberWithOptionalUnit
+                | "(" ArithmeticExpr ")"
+
+NumberWithOptionalUnit -> NUMBER [ UnitSpec ]
+UnitSpec               -> "[" UnitExpr "]"
+UnitExpr               -> UnitTerm (("*" | "/") UnitTerm)*
+UnitTerm               -> UnitFactor ["^" Exponent]
+UnitFactor             -> "(" UnitExpr ")" | Base
+Base                   -> "s" | "m" | "kg" | "A" | "K" | "mol" | "cd"
+Exponent               -> INTEGER (optionally signed in the lexer)
+
 """
 
 # ========== 1. LEXER ==========
@@ -24,11 +32,13 @@ Usage:
 def tokenize(text):
     """
     Convert the input string into a list of tokens.
-    Tokens include:
-      - SI base units: 's', 'm', 'kg', 'A', 'K', 'mol', 'cd'
-      - Operators: '*', '/', '^'
-      - Parentheses: '(', ')'
-      - Integers (optionally with leading + or -)
+    Recognized tokens:
+      - Parentheses: '(' or ')'
+      - Brackets for units: '[' or ']'
+      - Arithmetic operators: '+', '-', '*', '/'
+      - Caret: '^'
+      - SI base units: s, m, kg, A, K, mol, cd
+      - Numbers: integers or floats, optionally signed (e.g. -3.14, +2, 1.0, 42)
     Whitespace is ignored.
     """
     tokens = []
@@ -44,39 +54,57 @@ def tokenize(text):
             continue
 
         # Single-char tokens
-        if c in ('*', '/', '(', ')', '^'):
+        if c in ('(', ')', '[', ']', '+', '-', '*', '/', '^'):
+            # Distinguish minus as operator vs minus as sign for a number.
+            # We'll keep '-' as its own token; if it appears directly before a digit or a decimal point,
+            # we can interpret it as part of a signed number in the parser logic (or keep it separate).
             tokens.append(c)
             i += 1
             continue
 
-        # Potentially multi-letter base units or sign+number
+        # Letters -> Could be base unit or start of 'kg'/'mol' etc.
         if c.isalpha():
-            # Collect consecutive letters (e.g. 'kg', 'mol')
             start = i
             while i < length and text[i].isalpha():
                 i += 1
-            token_value = text[start:i]
+            token_value = text[start:i]  # e.g. "kg", "mol"
             tokens.append(token_value)
             continue
 
-        # Integers (with optional + or - prefix)
-        if c.isdigit() or c in ('+', '-'):
+        # Digits or decimal -> parse as (possibly) a float
+        if c.isdigit() or c == '.':
             start = i
-            # If there's a leading sign, consume it
-            if c in ('+', '-'):
-                i += 1
-                # Check if the next character is digit
-                if i >= length or not text[i].isdigit():
-                    raise ValueError(f"Invalid numeric token starting at '{text[start:]}'")
-            # Now consume all digits
-            while i < length and text[i].isdigit():
+            # Consume leading digits/decimal point
+            i += 1
+            has_dot = (c == '.')
+            while i < length and (text[i].isdigit() or (text[i] == '.' and not has_dot)):
+                if text[i] == '.':
+                    has_dot = True
                 i += 1
             token_value = text[start:i]
             tokens.append(token_value)
             continue
 
-        # If we get here, it's an unexpected character
-        raise ValueError(f"Unexpected character in input: '{c}' at index {i}")
+        # If we get here, we might be seeing a sign (+/-) before digits as part of a single token
+        if (c in ('+', '-') and i + 1 < length and (text[i+1].isdigit() or text[i+1] == '.')):
+            # parse sign + number
+            start = i
+            i += 1
+            has_dot = False
+            # We handle the next potential digit(s) or decimal
+            if i < length and text[i] == '.':
+                has_dot = True
+                i += 1
+            while i < length and (text[i].isdigit() or (text[i] == '.' and not has_dot)):
+                if text[i] == '.':
+                    has_dot = True
+                i += 1
+            token_value = text[start:i]
+            tokens.append(token_value)
+            continue
+
+        # Otherwise, unrecognized character
+        raise ValueError(f"Unrecognized character '{c}' at index {i}")
 
     return tokens
 
@@ -85,13 +113,20 @@ def tokenize(text):
 
 class Parser:
     """
-    A simple recursive-descent parser based on the grammar:
+    Recursive-descent parser for the grammar:
 
-      Expression -> Term { ("*" | "/") Term }
-      Term       -> Factor [ "^" Exponent ]
-      Factor     -> "(" Expression ")" | Base
-      Base       -> s | m | kg | A | K | mol | cd
-      Exponent   -> integer (with optional + or -)
+      ArithmeticExpr -> Term (("+" | "-") Term)*
+      Term           -> Factor (("*" | "/") Factor)*
+      Factor         -> NumberWithOptionalUnit
+                      | "(" ArithmeticExpr ")"
+
+      NumberWithOptionalUnit -> NUMBER [ UnitSpec ]
+      UnitSpec               -> "[" UnitExpr "]"
+      UnitExpr               -> UnitTerm (("*" | "/") UnitTerm)*
+      UnitTerm               -> UnitFactor ["^" Exponent]
+      UnitFactor             -> "(" UnitExpr ")" | Base
+      Base                   -> "s" | "m" | "kg" | "A" | "K" | "mol" | "cd"
+      Exponent               -> INTEGER
     """
 
     def __init__(self, tokens):
@@ -101,123 +136,222 @@ class Parser:
     def current_token(self):
         if self.pos < len(self.tokens):
             return self.tokens[self.pos]
-        return None
+        return None  # End of stream
 
     def advance(self):
         self.pos += 1
 
-    def match(self, expected):
+    def match(self, *expected_values):
         """
-        If the current token matches 'expected', consume it and return True.
-        Otherwise return False.
+        If the current token is in the expected_values, consume it and return it.
+        Otherwise return None.
         """
-        if self.current_token() == expected:
+        tok = self.current_token()
+        if tok in expected_values:
             self.advance()
-            return True
-        return False
+            return tok
+        return None
 
-    def expect(self, expected):
+    def expect(self, *expected_values):
         """
-        Consume the current token if it matches 'expected'.
-        Otherwise, raise a parsing error.
+        If the current token is one of expected_values, consume and return it.
+        Otherwise, raise an error.
         """
-        if not self.match(expected):
-            raise ValueError(f"Parsing error: expected '{expected}', got '{self.current_token()}'")
-
-    # ----- Grammar rules -----
+        tok = self.current_token()
+        if tok in expected_values:
+            self.advance()
+            return tok
+        raise ValueError(
+            f"Parse error at token {tok}, expected one of {expected_values}."
+        )
 
     def parse(self):
         """
-        Entry point: parse an Expression and check for extra tokens.
-        Returns a parse tree (nested tuples).
+        Parse the entire input as an ArithmeticExpr, and ensure no extra tokens.
         """
-        node = self.parse_expression()
-        # If there are leftover tokens, it's an error
+        expr = self.parse_arithmetic_expr()
         if self.current_token() is not None:
             raise ValueError(f"Extra tokens after valid expression: {self.current_token()}")
-        return node
+        return expr
 
-    def parse_expression(self):
+    # ---------- Arithmetic Grammar ----------
+
+    def parse_arithmetic_expr(self):
         """
-        Expression -> Term { ("*" | "/") Term }
+        ArithmeticExpr -> Term (("+" | "-") Term)*
         """
         node = self.parse_term()
 
-        while self.current_token() in ("*", "/"):
-            op = self.current_token()
-            self.advance()  # consume '*' or '/'
+        while True:
+            tok = self.match("+", "-")
+            if not tok:
+                break
             right = self.parse_term()
-            node = ("binop", op, node, right)
+            node = ("binop", tok, node, right)
 
         return node
 
     def parse_term(self):
         """
-        Term -> Factor [ "^" Exponent ]
+        Term -> Factor (("*" | "/") Factor)*
         """
         node = self.parse_factor()
 
-        if self.match("^"):
-            # We expect an integer token (optionally with leading + or -).
-            exponent_token = self.current_token()
-            if exponent_token is None:
-                raise ValueError("Parsing error: missing exponent after '^'")
-
-            # Validate it's numeric
-            if exponent_token.lstrip('+-').isdigit():
-                self.advance()
-                node = ("exponent", node, exponent_token)
-            else:
-                raise ValueError(f"Parsing error: invalid exponent token '{exponent_token}'")
+        while True:
+            tok = self.match("*", "/")
+            if not tok:
+                break
+            right = self.parse_factor()
+            node = ("binop", tok, node, right)
 
         return node
 
     def parse_factor(self):
         """
-        Factor -> "(" Expression ")" | Base
+        Factor -> NumberWithOptionalUnit | "(" ArithmeticExpr ")"
+        """
+        if self.match("("):
+            # ( ArithmeticExpr )
+            expr = self.parse_arithmetic_expr()
+            self.expect(")")
+            return expr
+        else:
+            return self.parse_number_with_unit()
+
+    # ---------- Number + Optional Unit ----------
+
+    def parse_number_with_unit(self):
+        """
+        NumberWithOptionalUnit -> NUMBER [ UnitSpec ]
+        NUMBER can be an integer or float, optionally signed (e.g. 3, -2, 1.5).
         """
         tok = self.current_token()
-        if tok == "(":
+        if tok is None:
+            raise ValueError("Unexpected end of input while parsing number.")
+
+        # Validate that this is indeed a numeric token
+        if self._is_number(tok):
             self.advance()
-            node = self.parse_expression()
+            number_node = ("number", tok)
+        else:
+            raise ValueError(f"Expected numeric value, got '{tok}'")
+
+        # Check if next token is '[' (start of unit spec)
+        if self.match("["):
+            unit_node = self.parse_unit_expr()
+            self.expect("]")
+            return ("measurement", number_node, unit_node)
+        else:
+            # Just a plain number without a unit
+            return number_node
+
+    # ---------- Unit Grammar ----------
+
+    def parse_unit_expr(self):
+        """
+        UnitExpr -> UnitTerm (("*" | "/") UnitTerm)*
+        """
+        node = self.parse_unit_term()
+
+        while True:
+            tok = self.match("*", "/")
+            if not tok:
+                break
+            right = self.parse_unit_term()
+            node = ("unit-binop", tok, node, right)
+
+        return node
+
+    def parse_unit_term(self):
+        """
+        UnitTerm -> UnitFactor ["^" Exponent]
+        """
+        node = self.parse_unit_factor()
+
+        if self.match("^"):
+            exp = self.parse_exponent()
+            node = ("unit-exponent", node, exp)
+
+        return node
+
+    def parse_unit_factor(self):
+        """
+        UnitFactor -> "(" UnitExpr ")" | Base
+        """
+        if self.match("("):
+            expr = self.parse_unit_expr()
             self.expect(")")
-            return node
+            return expr
         else:
             return self.parse_base()
 
     def parse_base(self):
         """
-        Base -> s | m | kg | A | K | mol | cd
+        Base -> "s" | "m" | "kg" | "A" | "K" | "mol" | "cd"
         """
+        bases = ["s", "m", "kg", "A", "K", "mol", "cd"]
         tok = self.current_token()
-        valid_bases = ["s", "m", "kg", "A", "K", "mol", "cd"]
-        if tok in valid_bases:
+        if tok in bases:
             self.advance()
             return ("base", tok)
         else:
-            raise ValueError(f"Parsing error: expected a base unit, got '{tok}'")
+            raise ValueError(f"Expected one of {bases}, got '{tok}'")
+
+    def parse_exponent(self):
+        """
+        Exponent -> INTEGER (we allow it to be a signed integer token from the lexer)
+        Example: 2, -3, +4
+        """
+        tok = self.current_token()
+        if tok is None:
+            raise ValueError("Expected exponent number, found end of input.")
+
+        # Check if it's an integer (possibly with sign)
+        # We simply ensure that removing leading + or - leaves digits
+        if tok.lstrip("+-").isdigit():
+            self.advance()
+            return ("exponent", tok)
+        else:
+            raise ValueError(f"Expected integer exponent, got '{tok}'")
+
+    # ---------- Helpers ----------
+
+    @staticmethod
+    def _is_number(token):
+        """
+        Check if a token looks like an integer or float (including possible leading sign).
+        We'll use a simple approach here: attempt float() conversion.
+        """
+        try:
+            float(token)
+            return True
+        except ValueError:
+            return False
 
 
-# ========== 3. TESTING OR MAIN USAGE ==========
+# ========== 3. TEST / MAIN ==========
 
 def main():
-    # Modify the input string to test different expressions
-    TEST_INPUT = "kg*m / s^2"
+    # Try different expressions here:
+    TEST_INPUTS = [
+        "1 [m/s]",
+        "(1+1) [m/s^2]",
+        "1 [kg] * 9.8 [m/s^2]",
+        "-3.14 [mol] / (2 [cd])",
+        "((2+2)*3) [s]",
+        "2.5 [kg*m/(s^2)] - 4 [A^2]"
+    ]
 
-    try:
-        # Lex
-        tokens = tokenize(TEST_INPUT)
-        print("Tokens:", tokens)
-
-        # Parse
-        parser = Parser(tokens)
-        parse_tree = parser.parse()
-
-        # Print parse tree
-        print("Parse tree:", parse_tree)
-
-    except ValueError as e:
-        print("Error:", e)
+    for inp in TEST_INPUTS:
+        print(f"\nInput: {inp}")
+        try:
+            tokens = tokenize(inp)
+            parser = Parser(tokens)
+            parse_tree = parser.parse()
+            print("Tokens:", tokens)
+            print("Parse Tree:", parse_tree)
+        except ValueError as e:
+            print("Error:", e)
 
 
 if __name__ == "__main__":
