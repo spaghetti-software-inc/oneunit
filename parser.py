@@ -1,22 +1,18 @@
 #!/usr/bin/env python3
 
-"""
-A REPL for parsing arithmetic expressions with SI units and performing
-dimensional analysis. Uses the rich library for nicer console output.
-
-Example usage:
-    python si_repl.py
-"""
-
+import sys
 import re
+import argparse
+
 from rich.console import Console
 from rich.prompt import Prompt
+from rich.table import Table
 
 ##############################################
 # 1. DIMENSION CONSTANTS & HELPERS
 ##############################################
 
-# We store dimension vectors in the order [L, M, T, I, Θ, N, J].
+# Dimension vector order: [L, M, T, I, Θ, N, J].
 #   L = length        (m)
 #   M = mass          (kg)
 #   T = time          (s)
@@ -26,14 +22,16 @@ from rich.prompt import Prompt
 #   J = luminous int. (cd)
 
 BASE_DIMENSIONS = {
-    "m":   [1, 0, 0, 0, 0, 0, 0],
-    "kg":  [0, 1, 0, 0, 0, 0, 0],
-    "s":   [0, 0, 1, 0, 0, 0, 0],
-    "A":   [0, 0, 0, 1, 0, 0, 0],
-    "K":   [0, 0, 0, 0, 1, 0, 0],
-    "mol": [0, 0, 0, 0, 0, 1, 0],
-    "cd":  [0, 0, 0, 0, 0, 0, 1],
+    "m":   [1, 0, 0, 0, 0, 0, 0],  # length
+    "kg":  [0, 1, 0, 0, 0, 0, 0],  # mass
+    "s":   [0, 0, 1, 0, 0, 0, 0],  # time
+    "A":   [0, 0, 0, 1, 0, 0, 0],  # electric current
+    "K":   [0, 0, 0, 0, 1, 0, 0],  # temperature
+    "mol": [0, 0, 0, 0, 0, 1, 0],  # amount of substance
+    "cd":  [0, 0, 0, 0, 0, 0, 1],  # luminous intensity
 }
+
+INDEX_TO_BASE = ["m", "kg", "s", "A", "K", "mol", "cd"]
 
 def zero_dim():
     return [0, 0, 0, 0, 0, 0, 0]
@@ -50,18 +48,72 @@ def dim_mul(d, n):
 def dim_eq(d1, d2):
     return all(a == b for a, b in zip(d1, d2))
 
+def is_dimless(d):
+    return all(x == 0 for x in d)
+
+
+def dim_to_si_string(dim):
+    """
+    Convert a 7D exponent vector into a human-readable SI expression.
+    Example:
+      [1,0,-2,0,0,0,0] => "m / s^2"
+      [0,0,0,0,0,0,0] => "-" (or return something like "")
+      [1,1,-3,0,0,0,0] => "kg*m^1 / s^3" or simply "kg*m / s^3"
+    We'll omit "^1" and show negative exponents in the denominator.
+    """
+    # If dimensionless, return a marker like "-" (or "")
+    if is_dimless(dim):
+        return "-"  # or just return "" to signify dimensionless
+
+    # We'll gather numerator parts and denominator parts
+    numerator_parts = []
+    denominator_parts = []
+
+    for i, exponent in enumerate(dim):
+        if exponent == 0:
+            continue
+
+        base_symbol = INDEX_TO_BASE[i]
+        exp_abs = abs(exponent)
+
+        # Omit "^1"
+        if exp_abs == 1:
+            exp_str = base_symbol
+        else:
+            exp_str = f"{base_symbol}^{exp_abs}"
+
+        if exponent > 0:
+            numerator_parts.append(exp_str)
+        else:
+            # exponent < 0
+            denominator_parts.append(exp_str)
+
+    # Build the final string
+    # (We separate numerator pieces with '*', likewise denominator pieces)
+    numerator = "*".join(numerator_parts)
+    denominator = "*".join(denominator_parts)
+
+    if numerator and not denominator:
+        return numerator
+    elif denominator and not numerator:
+        # e.g. if it's purely s^-2, that means 1 / s^2
+        return f"1/{denominator}"
+    else:
+        # both are non-empty
+        return f"{numerator} / {denominator}"
+
 ##############################################
 # 2. AST NODES
 ##############################################
 
 class NumberNode:
     """
-    Numeric literal (string) + optional raw unit string from brackets.
-    E.g. value_str="1.5", unit_str="[m/s^2]"
+    Numeric literal (string) + optional raw unit token [ ... ].
+    Example: value_str="1.5", unit_str="[m/s^2]"
     """
     def __init__(self, value_str, unit_str=None):
         self.value_str = value_str
-        self.unit_str = unit_str  # includes the brackets, e.g. "[m/s^2]"
+        self.unit_str = unit_str
 
     def __repr__(self):
         if self.unit_str:
@@ -71,8 +123,8 @@ class NumberNode:
 
 class BinOpNode:
     """
-    Operator node with left, op, right.
-    op in {+ - * / ^}
+    Binary operation node: left op right
+    op in { '+', '-', '*', '/', '^' }
     """
     def __init__(self, left, op, right):
         self.left = left
@@ -92,8 +144,8 @@ def tokenize(text):
       - numeric tokens (possibly signed)
       - parentheses: ( )
       - operators: + - * / ^
-      - bracketed unit chunk: anything from '[' to ']' is one token, e.g. [m/s^2]
-      - whitespace ignored
+      - bracketed unit chunk: [ ... ]
+      - ignore whitespace
     """
     tokens = []
     i = 0
@@ -106,7 +158,7 @@ def tokenize(text):
             i += 1
             continue
 
-        # Parentheses or operators
+        # Single-char operators or parentheses
         if c in ('(', ')', '+', '*', '/', '^'):
             tokens.append(c)
             i += 1
@@ -114,35 +166,36 @@ def tokenize(text):
 
         # Distinguish minus as unary sign vs operator
         if c == '-':
-            # If next char is digit or '.', treat as part of a number
             if (i + 1 < n) and (text[i+1].isdigit() or text[i+1] == '.'):
+                # negative number
                 start = i
                 i += 1
                 while i < n and (text[i].isdigit() or text[i] == '.'):
                     i += 1
-                tokens.append(text[start:i])  # e.g. "-3.14"
+                tokens.append(text[start:i])
             else:
+                # standalone operator
                 tokens.append('-')
                 i += 1
             continue
 
-        # Bracketed unit: read everything up to matching ']'
+        # Bracketed unit: read until matching ']'
         if c == '[':
             start = i
-            i += 1
             bracket_depth = 1
+            i += 1
             while i < n and bracket_depth > 0:
                 if text[i] == ']':
                     bracket_depth -= 1
                 else:
                     i += 1
             if bracket_depth != 0:
-                raise ValueError("Mismatched '[' ']' in unit specification.")
-            i += 1  # consume final ']'
-            tokens.append(text[start:i])  # e.g. "[m/s^2]"
+                raise ValueError("Mismatched brackets '[' ']' in unit.")
+            i += 1  # consume the ']'
+            tokens.append(text[start:i])  # entire chunk: "[ ... ]"
             continue
 
-        # Numbers (unsigned, if minus was handled above)
+        # Numbers
         if c.isdigit() or c == '.':
             start = i
             i += 1
@@ -164,7 +217,7 @@ class Parser:
     Grammar:
       Expr   -> Term (('+'|'-') Term)*
       Term   -> Factor (('*'|'/') Factor)*
-      Factor -> Power ('^' Factor)?   // exponent
+      Factor -> Power ('^' Factor)?
       Power  -> NumberWithOptionalUnit | '(' Expr ')'
     """
     def __init__(self, tokens):
@@ -195,7 +248,6 @@ class Parser:
         return node
 
     def parse_expr(self):
-        """Expr -> Term (('+'|'-') Term)*"""
         node = self.parse_term()
         while True:
             op = self.match('+', '-')
@@ -206,7 +258,6 @@ class Parser:
         return node
 
     def parse_term(self):
-        """Term -> Factor (('*'|'/') Factor)*"""
         node = self.parse_factor()
         while True:
             op = self.match('*', '/')
@@ -217,15 +268,19 @@ class Parser:
         return node
 
     def parse_factor(self):
-        """Factor -> Power ('^' Factor)?"""
+        """
+        Factor -> Power ('^' Factor)?
+        """
         base = self.parse_power()
         if self.match('^'):
-            exponent = self.parse_factor()
-            return BinOpNode(base, '^', exponent)
+            exponent_node = self.parse_factor()
+            return BinOpNode(base, '^', exponent_node)
         return base
 
     def parse_power(self):
-        """Power -> NumberWithOptionalUnit | '(' Expr ')'"""
+        """
+        Power -> NumberWithOptionalUnit | '(' Expr ')'
+        """
         if self.match('('):
             node = self.parse_expr()
             self.expect(')')
@@ -234,41 +289,39 @@ class Parser:
             return self.parse_number_with_unit()
 
     def parse_number_with_unit(self):
-        """
-        A numeric token plus optional bracket token.
-        e.g. "3.14" or "3.14 [m/s^2]"
-        """
         tok = self.current_token()
         if tok is None:
-            raise ValueError("Expected number, got end of input.")
-        # Check numeric
+            raise ValueError("Unexpected end of input (expected number).")
+
+        # Must be numeric
         try:
             float(tok)
         except ValueError:
-            raise ValueError(f"Expected numeric token, got {tok}")
-        self.pos += 1  # consume the numeric
+            raise ValueError(f"Expected numeric, got {tok}")
 
-        # Check if next token is a bracketed unit
+        self.pos += 1  # consume number
         unit_tok = None
+        # If next is bracketed unit
         if self.current_token() and self.current_token().startswith('['):
             unit_tok = self.current_token()
-            self.pos += 1  # consume bracketed chunk
+            self.pos += 1
 
-        return NumberNode(value_str=tok, unit_str=unit_tok)
+        return NumberNode(tok, unit_tok)
 
 ##############################################
-# 5. INTERPRETER (WITH DIMENSIONAL ANALYSIS)
+# 5. INTERPRETER (DIMENSIONAL ANALYSIS)
 ##############################################
 
 def evaluate(node):
-    """Recursively evaluate the AST node, returning (value: float, dim: list[7])."""
+    """
+    Evaluate the AST node -> (value: float, dimension: [7]).
+    """
     if isinstance(node, NumberNode):
         val = float(node.value_str)
-        # Parse unit string (if any) into a dimension vector
-        if not node.unit_str:
-            dim = zero_dim()  # dimensionless
-        else:
+        if node.unit_str:
             dim = parse_unit_string(node.unit_str)
+        else:
+            dim = zero_dim()
         return (val, dim)
 
     elif isinstance(node, BinOpNode):
@@ -299,10 +352,10 @@ def evaluate(node):
             return (left_val / right_val, dim_sub(left_dim, right_dim))
 
         elif op == '^':
-            # exponent must be dimensionless & typically an integer
+            # exponent must be dimensionless
             if not dim_eq(right_dim, zero_dim()):
                 raise ValueError("Exponent must be dimensionless.")
-            exponent_int = int(right_val)  # allow float->int
+            exponent_int = int(right_val)  # typical usage integer
             return (left_val ** exponent_int, dim_mul(left_dim, exponent_int))
 
         else:
@@ -313,18 +366,19 @@ def evaluate(node):
 
 def parse_unit_string(unit_tok):
     """
-    Convert a bracketed unit token (e.g. "[m/s^2]" or "[-]") into a dimension vector.
+    e.g. "[m/s^2]" -> parse inside "m/s^2" => dimension vector
+         "[-]" or empty => dimensionless
     """
-    inside = unit_tok.strip()
-    if not inside.startswith('[') or not inside.endswith(']'):
-        raise ValueError(f"Bad bracket token: {unit_tok}")
-    inside = inside[1:-1].strip()  # remove '[' and ']'
+    if not (unit_tok.startswith('[') and unit_tok.endswith(']')):
+        raise ValueError(f"Invalid unit token: {unit_tok}")
 
-    # Special case for dimensionless: "[-]" or "[]"
-    if inside == '-' or inside == '':
+    inside = unit_tok[1:-1].strip()  # remove brackets
+
+    # allow "[-]" or empty to mean dimensionless
+    if inside == '' or inside == '-':
         return zero_dim()
 
-    # We'll do a simplified parse, splitting on '*' and '/'.
+    # split on '*' or '/'
     parts = re.split(r'([\*/])', inside)
     parts = [p.strip() for p in parts if p.strip()]
 
@@ -335,12 +389,14 @@ def parse_unit_string(unit_tok):
         if part in ('*', '/'):
             current_op = part
         else:
-            base, exponent = parse_base_exponent(part)
+            # part might be "m", "s^2", "kg^3", etc.
+            base, exp = parse_base_exponent(part)
             if base not in BASE_DIMENSIONS:
                 raise ValueError(
-                    f"Unknown base unit '{base}'. Must be one of {list(BASE_DIMENSIONS.keys())}, or '[-]' for dimensionless."
+                    f"Unknown base unit '{base}' in unit string '{unit_tok}'. "
+                    f"Allowed: {list(BASE_DIMENSIONS.keys())} or [-]."
                 )
-            factor_dim = dim_mul(BASE_DIMENSIONS[base], exponent)
+            factor_dim = dim_mul(BASE_DIMENSIONS[base], exp)
             if current_op == '*':
                 dim = dim_add(dim, factor_dim)
             else:
@@ -350,57 +406,78 @@ def parse_unit_string(unit_tok):
 
 def parse_base_exponent(token):
     """
-    For something like "m^2" => (base="m", exponent=2).
-    If there's no '^', exponent=1.
+    e.g. "m^2" -> base=m, exponent=2
+         "kg^3" -> base=kg, exponent=3
+         "s" -> base=s, exponent=1
     """
     if '^' in token:
         base, exp_str = token.split('^', 1)
         e = int(exp_str.strip())
     else:
-        base = token
-        e = 1
+        base, e = token, 1
     return base.strip(), e
 
 ##############################################
-# 6. REPL USING RICH
+# 6. REPL & CLI
 ##############################################
 
+console = Console()
+
+def evaluate_expression(expr: str):
+    """
+    Parse & evaluate a single expression, returning (value, dimension) or raising an error.
+    """
+    tokens = tokenize(expr)
+    parser = Parser(tokens)
+    ast = parser.parse()
+    return evaluate(ast)
+
 def repl():
-    console = Console()
-    console.print("[bold green]Dimensional Analysis REPL[/bold green]")
-    console.print("Type an expression (or 'quit' to exit). Examples:")
-    console.print("  [italic]1.5 [kg] * 2 [m/s^2][/italic]")
-    console.print("  [italic](2 [m/s])^2[/italic]")
-    console.print("  [italic]2 [m] + 3 [m][/italic]")
-    console.print("  [italic]3.14 [-][/italic] (dimensionless)")
+    """
+    REPL using Rich. Enter expressions; 'q'/'quit'/'exit' to quit.
+    """
+    console.print("[bold cyan]Welcome to the Dimensional Analysis REPL![/]")
+    console.print("Enter an expression, or 'q'/'quit'/'exit' to quit.\n")
 
     while True:
-        expr = Prompt.ask("[bold white]Enter expression[/bold white]")
-        if expr.lower() in {"quit", "exit"}:
-            console.print("[bold yellow]Goodbye![/bold yellow]")
+        expr = Prompt.ask("[bold green]dim>[/]")
+        if expr.lower() in ("q", "quit", "exit"):
+            console.print("Goodbye!")
             break
 
         if not expr.strip():
-            continue  # just skip if empty
+            continue
 
         try:
-            tokens = tokenize(expr)
-            parser = Parser(tokens)
-            ast_root = parser.parse()
-            value, dim = evaluate(ast_root)
-
-            console.print(f"\n[bold cyan]Tokens[/bold cyan]: {tokens}")
-            console.print(f"[bold cyan]AST[/bold cyan]: {ast_root}")
-            console.print(f"[bold magenta]Value[/bold magenta]: [bold]{value}[/bold]")
-            console.print("[bold magenta]Dimension vector[/bold magenta] "
-                          f"(L,M,T,I,Θ,N,J): [bold]{dim}[/bold]\n")
-
+            val, dim = evaluate_expression(expr)
+            # Convert dimension to human-readable SI
+            dim_str = dim_to_si_string(dim)
+            console.print(f"[yellow]Result:[/] {val} [magenta]{dim_str}[/]")
         except Exception as e:
-            console.print(f"[bold red]ERROR[/bold red]: {e}\n")
-
+            console.print(f"[red]ERROR:[/] {e}")
 
 def main():
-    repl()
+    parser = argparse.ArgumentParser(
+        description="Dimensional Analysis Calculator with optional REPL"
+    )
+    parser.add_argument(
+        "expressions", nargs="*",
+        help="Expressions to evaluate. If none provided, enters REPL mode."
+    )
+    args = parser.parse_args()
+
+    if not args.expressions:
+        # REPL mode
+        repl()
+    else:
+        # Evaluate each expression once
+        for expr in args.expressions:
+            try:
+                val, dim = evaluate_expression(expr)
+                dim_str = dim_to_si_string(dim)
+                console.print(f"[bold]{expr}[/] => [yellow]{val}[/] [magenta]{dim_str}[/]")
+            except Exception as e:
+                console.print(f"[red]ERROR in '{expr}':[/] {e}")
 
 if __name__ == "__main__":
     main()
